@@ -621,7 +621,7 @@ frame:RegisterEvent("TRADE_CLOSED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:SetScript("OnEvent", function()
     -- vanilla passes event data through the globals "event" and "arg1"
-    if event == "ADDON_LOADED" and arg1 == "AutoTradeSand" then
+    if event == "ADDON_LOADED" and arg1 and string.lower(arg1) == "autotradesand" then
         OnAddonLoaded()
     elseif event == "PLAYER_ENTERING_WORLD" then
         if ATS_DB and UpdateSandIcon then UpdateSandIcon() end
