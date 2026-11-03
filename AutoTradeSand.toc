@@ -1,7 +1,7 @@
 ## Interface: 11200
 ## Title: AutoTradeSand
-## Notes: Automatically puts Hourglass Sand in the trade window (1.12 port). Minimap button + config.
+## Notes: Automatically puts Hourglass Sand in the trade window (1.12 port). Minimap button, config and trade history.
 ## Author: Duciel
-## Version: 2.1-1.12
+## Version: 2.2-1.12
 ## SavedVariablesPerCharacter: ATS_DB
 AutoTradeSand.lua

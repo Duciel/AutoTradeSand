@@ -12,6 +12,7 @@ local tradeOpen = false
 local refreshing = false
 local ConfigFrame, MinimapButton
 local pending = nil
+local tradeName, snap, closedSnap
 local cfgCheck, cfgSlider, cfgEdit
 local RefreshConfig, UpdateMinimapButton, ToggleConfig, UpdateSandIcon
 
@@ -427,10 +428,114 @@ local function ApplyItemEdit(edit)
     end
 end
 
+----------------------------------------------------------------
+-- History (who got how much sand) + tabs
+----------------------------------------------------------------
+local HIST_ROWS = 40
+local HIST_PER_COL = 20
+local histRows = {}
+local histSummary
+local settingsW, histW = {}, {}
+local tabBtnS, tabBtnH
+local activeTab = "settings"
+local RefreshHistory
+
+-- Count the sand currently in OUR side of the trade window.
+local function SnapshotTrade()
+    if not tradeOpen then return end
+    local n = 0
+    for i = 1, MAX_SLOTS do
+        local link = GetTradePlayerItemLink(i)
+        if link then
+            local _, _, id = string.find(link, "item:(%d+)")
+            if tonumber(id) == ATS_DB.ItemID then
+                local _, _, num = GetTradePlayerItemInfo(i)
+                n = n + (num or 1)
+            end
+        end
+    end
+    snap = { name = tradeName, sand = n }
+end
+
+local function RecordTrade(name, sand)
+    if not ATS_DB.History then ATS_DB.History = {} end
+    local h = ATS_DB.History[name]
+    if not h then
+        h = { sand = 0, trades = 0 }
+        ATS_DB.History[name] = h
+    end
+    h.sand = (h.sand or 0) + sand
+    h.trades = (h.trades or 0) + 1
+    h.last = time()
+    if ATS_DB.Debug then Msg("history: " .. name .. " +" .. sand .. " sand") end
+    if RefreshHistory then RefreshHistory() end
+end
+
+-- Called when the client reports "Trade complete."
+local function OnTradeComplete()
+    local s = snap or closedSnap
+    if s and s.name and s.sand and s.sand > 0 then
+        RecordTrade(s.name, s.sand)
+    end
+    snap = nil
+    closedSnap = nil
+end
+
+RefreshHistory = function()
+    if not ConfigFrame then return end
+    local list = {}
+    local totalSand, players = 0, 0
+    if ATS_DB.History then
+        for name, h in pairs(ATS_DB.History) do
+            table.insert(list, { name = name, sand = h.sand or 0, trades = h.trades or 0 })
+            totalSand = totalSand + (h.sand or 0)
+            players = players + 1
+        end
+    end
+    table.sort(list, function(a, b)
+        if a.sand ~= b.sand then return a.sand > b.sand end
+        return a.name < b.name
+    end)
+    for i = 1, HIST_ROWS do
+        local row = histRows[i]
+        local e = list[i]
+        if e then
+            row.name:SetText(e.name)
+            row.cnt:SetText(e.sand .. "  (" .. e.trades .. "x)")
+        else
+            row.name:SetText("")
+            row.cnt:SetText("")
+        end
+    end
+    local txt = players .. " players - " .. totalSand .. " sand traded"
+    if players > HIST_ROWS then txt = txt .. " (top " .. HIST_ROWS .. " shown)" end
+    histSummary:SetText(txt)
+end
+
+local function ShowTab(name)
+    activeTab = name
+    local i
+    for i = 1, table.getn(settingsW) do
+        if name == "settings" then settingsW[i]:Show() else settingsW[i]:Hide() end
+    end
+    for i = 1, table.getn(histW) do
+        if name == "history" then histW[i]:Show() else histW[i]:Hide() end
+    end
+    if name == "history" then
+        ConfigFrame:SetHeight(405)
+        tabBtnH:Disable()
+        tabBtnS:Enable()
+    else
+        ConfigFrame:SetHeight(285)
+        tabBtnS:Disable()
+        tabBtnH:Enable()
+    end
+end
+
 local function CreateConfig()
     local f = CreateFrame("Frame", "ATS_ConfigFrame", UIParent)
-    f:SetWidth(280)
-    f:SetHeight(250)
+    f:SetWidth(390)
+    f:SetHeight(285)
     f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
     f:SetFrameStrata("DIALOG")
     f:SetMovable(true)
@@ -444,8 +549,13 @@ local function CreateConfig()
     })
     f:SetScript("OnDragStart", function() this:StartMoving() end)
     f:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
-    f:SetScript("OnShow", function() RefreshConfig() end)
+    f:SetScript("OnShow", function()
+        ShowTab(activeTab)
+        RefreshConfig()
+        RefreshHistory()
+    end)
     f:Hide()
+    ConfigFrame = f
 
     local title = f:CreateFontString("ATS_ConfigTitle", "ARTWORK", "GameFontNormal")
     title:SetPoint("TOP", f, "TOP", 0, -18)
@@ -454,19 +564,36 @@ local function CreateConfig()
     local close = CreateFrame("Button", "ATS_ConfigClose", f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -6)
 
-    -- Auto trade checkbox
+    -- Tabs
+    tabBtnS = CreateFrame("Button", "ATS_TabSettings", f, "UIPanelButtonTemplate")
+    tabBtnS:SetWidth(90)
+    tabBtnS:SetHeight(22)
+    tabBtnS:SetPoint("TOPLEFT", f, "TOPLEFT", 22, -40)
+    tabBtnS:SetText("Settings")
+    tabBtnS:SetScript("OnClick", function() ShowTab("settings") end)
+
+    tabBtnH = CreateFrame("Button", "ATS_TabHistory", f, "UIPanelButtonTemplate")
+    tabBtnH:SetWidth(90)
+    tabBtnH:SetHeight(22)
+    tabBtnH:SetPoint("LEFT", tabBtnS, "RIGHT", 4, 0)
+    tabBtnH:SetText("History")
+    tabBtnH:SetScript("OnClick", function() ShowTab("history") end)
+
+    ------------------------------------------------------------
+    -- Settings tab
+    ------------------------------------------------------------
     cfgCheck = CreateFrame("CheckButton", "ATS_AutoCheck", f, "UICheckButtonTemplate")
-    cfgCheck:SetPoint("TOPLEFT", f, "TOPLEFT", 24, -45)
+    cfgCheck:SetPoint("TOPLEFT", f, "TOPLEFT", 40, -78)
     getglobal("ATS_AutoCheckText"):SetText("Auto trade enabled")
     cfgCheck:SetScript("OnClick", function()
         if refreshing then return end
         if this:GetChecked() then SetAutoFill(true) else SetAutoFill(false) end
     end)
+    table.insert(settingsW, cfgCheck)
 
-    -- Sand count slider
     cfgSlider = CreateFrame("Slider", "ATS_CountSlider", f, "OptionsSliderTemplate")
-    cfgSlider:SetWidth(200)
-    cfgSlider:SetPoint("TOP", f, "TOP", 0, -100)
+    cfgSlider:SetWidth(220)
+    cfgSlider:SetPoint("TOP", f, "TOP", 0, -130)
     cfgSlider:SetMinMaxValues(1, 20)
     cfgSlider:SetValueStep(1)
     getglobal("ATS_CountSliderLow"):SetText("1")
@@ -477,11 +604,12 @@ local function CreateConfig()
         ATS_DB.SandCount = v
         getglobal("ATS_CountSliderText"):SetText("Sand per trade: " .. v)
     end)
+    table.insert(settingsW, cfgSlider)
 
-    -- Item ID edit box
     local label = f:CreateFontString("ATS_ItemLabel", "ARTWORK", "GameFontNormal")
-    label:SetPoint("TOPLEFT", f, "TOPLEFT", 28, -132)
+    label:SetPoint("TOPLEFT", f, "TOPLEFT", 60, -165)
     label:SetText("Item ID:")
+    table.insert(settingsW, label)
 
     cfgEdit = CreateFrame("EditBox", "ATS_ItemEdit", f, "InputBoxTemplate")
     cfgEdit:SetWidth(90)
@@ -500,31 +628,96 @@ local function CreateConfig()
     cfgEdit:SetScript("OnEditFocusLost", function()
         if not refreshing then ApplyItemEdit(this) end
     end)
+    table.insert(settingsW, cfgEdit)
 
-    -- Buttons
     local fill = CreateFrame("Button", "ATS_FillButton", f, "UIPanelButtonTemplate")
-    fill:SetWidth(105)
+    fill:SetWidth(110)
     fill:SetHeight(22)
-    fill:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 24, 40)
+    fill:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 60, 50)
     fill:SetText("Fill now")
     fill:SetScript("OnClick", function()
         if tradeOpen then FillTrade() else Msg("Trade window is not open") end
     end)
+    table.insert(settingsW, fill)
 
     local clear = CreateFrame("Button", "ATS_ClearButton", f, "UIPanelButtonTemplate")
-    clear:SetWidth(105)
+    clear:SetWidth(110)
     clear:SetHeight(22)
-    clear:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 40)
+    clear:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -60, 50)
     clear:SetText("Clear trade")
     clear:SetScript("OnClick", function()
         if tradeOpen then ClearTrade() Msg("Trade cleared") else Msg("Trade window is not open") end
     end)
+    table.insert(settingsW, clear)
 
     local hint = f:CreateFontString("ATS_ConfigHint", "ARTWORK", "GameFontHighlightSmall")
-    hint:SetPoint("BOTTOM", f, "BOTTOM", 0, 20)
+    hint:SetPoint("BOTTOM", f, "BOTTOM", 0, 24)
     hint:SetText("Minimap icon: left click = on/off, right click = config")
+    table.insert(settingsW, hint)
 
-    ConfigFrame = f
+    ------------------------------------------------------------
+    -- History tab: 2 columns x 20 rows = 40 players at a glance
+    ------------------------------------------------------------
+    local col, r
+    for col = 0, 1 do
+        local x = 24 + col * 185
+        local hp = f:CreateFontString("ATS_HistHeadP" .. col, "ARTWORK", "GameFontNormalSmall")
+        hp:SetPoint("TOPLEFT", f, "TOPLEFT", x, -70)
+        hp:SetText("Player")
+        table.insert(histW, hp)
+        local hs = f:CreateFontString("ATS_HistHeadS" .. col, "ARTWORK", "GameFontNormalSmall")
+        hs:SetPoint("TOPLEFT", f, "TOPLEFT", x + 85, -70)
+        hs:SetWidth(80)
+        hs:SetJustifyH("RIGHT")
+        hs:SetText("Sand (trades)")
+        table.insert(histW, hs)
+    end
+
+    local i
+    for i = 1, HIST_ROWS do
+        local c = 0
+        if i > HIST_PER_COL then c = 1 end
+        local rr = math.mod(i - 1, HIST_PER_COL)
+        local x = 24 + c * 185
+        local y = -86 - rr * 13
+
+        local nameFS = f:CreateFontString("ATS_HistName" .. i, "ARTWORK", "GameFontHighlightSmall")
+        nameFS:SetPoint("TOPLEFT", f, "TOPLEFT", x, y)
+        nameFS:SetWidth(90)
+        nameFS:SetHeight(12)
+        nameFS:SetJustifyH("LEFT")
+
+        local cntFS = f:CreateFontString("ATS_HistCnt" .. i, "ARTWORK", "GameFontNormalSmall")
+        cntFS:SetPoint("TOPLEFT", f, "TOPLEFT", x + 85, y)
+        cntFS:SetWidth(80)
+        cntFS:SetHeight(12)
+        cntFS:SetJustifyH("RIGHT")
+
+        histRows[i] = { name = nameFS, cnt = cntFS }
+        table.insert(histW, nameFS)
+        table.insert(histW, cntFS)
+    end
+
+    histSummary = f:CreateFontString("ATS_HistSummary", "ARTWORK", "GameFontHighlightSmall")
+    histSummary:SetPoint("BOTTOM", f, "BOTTOM", 0, 52)
+    table.insert(histW, histSummary)
+
+    local clearHist = CreateFrame("Button", "ATS_ClearHistory", f, "UIPanelButtonTemplate")
+    clearHist:SetWidth(130)
+    clearHist:SetHeight(22)
+    clearHist:SetPoint("BOTTOM", f, "BOTTOM", 0, 24)
+    clearHist:SetText("Clear history")
+    clearHist:SetScript("OnClick", function()
+        if IsShiftKeyDown() then
+            ATS_DB.History = {}
+            RefreshHistory()
+            Msg("History cleared")
+        else
+            Msg("Hold Shift and click to clear the history")
+        end
+    end)
+    table.insert(histW, clearHist)
+
     tinsert(UISpecialFrames, "ATS_ConfigFrame")
 end
 
@@ -544,6 +737,12 @@ end
 
 local function OnTradeShow()
     tradeOpen = true
+    tradeName = UnitName("NPC")
+    if (not tradeName or tradeName == "") and TradeFrameRecipientNameText then
+        tradeName = TradeFrameRecipientNameText:GetText()
+    end
+    closedSnap = nil
+    snap = { name = tradeName, sand = 0 }
     if ATS_DB.AutoFill then
         FillTrade()
     end
@@ -552,6 +751,8 @@ end
 local function OnTradeClosed()
     tradeOpen = false
     pending = nil
+    closedSnap = snap
+    snap = nil
 end
 
 ----------------------------------------------------------------
@@ -560,6 +761,7 @@ end
 local function ShowHelp()
     Msg("/ats config - open the config window")
     Msg("/ats toggle - enable / disable auto trade")
+    Msg("/ats history - show who you traded sand to")
     Msg("/ats fill - fill the trade window with sand")
     Msg("/ats clear - clear your side of the trade")
     Msg("/ats <number> - sand per trade (e.g. /ats 2)")
@@ -576,6 +778,9 @@ local function SlashHandler(text)
         ShowHelp()
     elseif word == "config" or word == "options" then
         ToggleConfig()
+    elseif word == "history" then
+        if not ConfigFrame:IsVisible() then ConfigFrame:Show() end
+        ShowTab("history")
     elseif word == "toggle" or word == "auto" then
         SetAutoFill(not ATS_DB.AutoFill)
     elseif word == "fill" then
@@ -619,6 +824,9 @@ frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("TRADE_SHOW")
 frame:RegisterEvent("TRADE_CLOSED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+frame:RegisterEvent("TRADE_ACCEPT_UPDATE")
+frame:RegisterEvent("TRADE_PLAYER_ITEM_CHANGED")
+frame:RegisterEvent("UI_INFO_MESSAGE")
 frame:SetScript("OnEvent", function()
     -- vanilla passes event data through the globals "event" and "arg1"
     if event == "ADDON_LOADED" and arg1 and string.lower(arg1) == "autotradesand" then
@@ -629,5 +837,11 @@ frame:SetScript("OnEvent", function()
         if ATS_DB then OnTradeShow() end
     elseif event == "TRADE_CLOSED" then
         OnTradeClosed()
+    elseif event == "TRADE_ACCEPT_UPDATE" or event == "TRADE_PLAYER_ITEM_CHANGED" then
+        if ATS_DB and tradeOpen then SnapshotTrade() end
+    elseif event == "UI_INFO_MESSAGE" then
+        if ATS_DB and arg1 and arg1 == (ERR_TRADE_COMPLETE or "Trade complete.") then
+            OnTradeComplete()
+        end
     end
 end)
