@@ -9,13 +9,17 @@ Copy this folder to `Interface\AddOns\AutoTradeSand\` (the folder name must be `
 
 ## Usage
 - **Minimap button:** left click = enable / disable auto trade, right click = config window, drag = move.
-- **History tab** (config window): who you gave sand to, total sand and number of trades per player, 40 players at a glance. Only completed trades are counted. Shift-click "Clear history" to reset it.
+- **History tab** (config window): for each player, the sand you **sent**, how many they **used** (seen in the combat log, only while they still hold some of yours), how many they traded **back**, and how many are **left** with them. 40 players at a glance. Only completed trades are counted. It is saved with your character.
+- **Reset prompt:** entering Blackwing Lair asks whether to reset the history (once per entry; can be disabled in Settings). A reset can be undone with `/ats undo`. Shift-click "Reset history" to reset it by hand.
 - The stack is split in your bags first (vanilla trades always move a whole stack), so you need one free bag slot.
 
 | Command | Effect |
 |---|---|
 | `/ats config` | open the config window |
 | `/ats history` | open the history tab |
+| `/ats undo` | restore the history after a reset |
+| `/ats zone <name>` | zone that asks to reset the history |
+| `/ats spell <name>` | spell name looked for in the combat log (default Hourglass Sand) |
 | `/ats toggle` | enable / disable auto trade |
 | `/ats fill` / `/ats clear` | fill / clear the open trade window |
 | `/ats <n>` | sand per trade (e.g. `/ats 2`) |

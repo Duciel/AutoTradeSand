@@ -13,7 +13,7 @@ local refreshing = false
 local ConfigFrame, MinimapButton
 local pending = nil
 local tradeName, snap, closedSnap
-local cfgCheck, cfgSlider, cfgEdit
+local cfgCheck, cfgSlider, cfgEdit, cfgZone
 local RefreshConfig, UpdateMinimapButton, ToggleConfig, UpdateSandIcon
 
 local function Msg(text)
@@ -406,6 +406,10 @@ RefreshConfig = function()
     cfgSlider:SetValue(ATS_DB.SandCount)
     getglobal("ATS_CountSliderText"):SetText("Sand per trade: " .. ATS_DB.SandCount)
     cfgEdit:SetText(tostring(ATS_DB.ItemID))
+    if cfgZone then
+        if ATS_DB.PromptReset ~= false then cfgZone:SetChecked(1) else cfgZone:SetChecked(nil) end
+        getglobal("ATS_ZoneCheckText"):SetText("Ask to reset history in " .. (ATS_DB.ResetZone or "Blackwing Lair"))
+    end
     refreshing = false
 end
 
@@ -430,9 +434,20 @@ end
 
 ----------------------------------------------------------------
 -- History (who got how much sand) + tabs
+-- Stored in ATS_DB.History (saved variable), so it survives logout / reload.
+-- Per player: sand = sent, used = uses seen in the combat log, back = traded back.
 ----------------------------------------------------------------
 local HIST_ROWS = 40
 local HIST_PER_COL = 20
+local DEFAULT_RESET_ZONE = "Blackwing Lair"
+local DEFAULT_SPELL = "Hourglass Sand"
+
+local COLKEY = { "name", "sent", "used", "back", "left" }
+local COLNAME = { "Player", "Sent", "Used", "Back", "Left" }
+local COLX = { 0, 86, 118, 150, 182 }
+local COLW = { 84, 30, 30, 30, 30 }
+local COLCOL = { false, { 1, 1, 1 }, { 0.4, 1, 0.4 }, { 0.5, 0.8, 1 }, { 1, 0.6, 0.2 } }
+
 local histRows = {}
 local histSummary
 local settingsW, histW = {}, {}
@@ -440,75 +455,240 @@ local tabBtnS, tabBtnH
 local activeTab = "settings"
 local RefreshHistory
 
--- Count the sand currently in OUR side of the trade window.
-local function SnapshotTrade()
-    if not tradeOpen then return end
+local function Num(v)
+    return v or 0
+end
+
+local function Outstanding(h)
+    local left = Num(h.sand) - Num(h.used) - Num(h.back)
+    if left < 0 then left = 0 end
+    return left
+end
+
+local function HistoryTotals()
+    local players, sent, used, back, left = 0, 0, 0, 0, 0
+    if ATS_DB.History then
+        for _, h in pairs(ATS_DB.History) do
+            players = players + 1
+            sent = sent + Num(h.sand)
+            used = used + Num(h.used)
+            back = back + Num(h.back)
+            left = left + Outstanding(h)
+        end
+    end
+    return players, sent, used, back, left
+end
+
+----------------------------------------------------------------
+-- Trade snapshot: sand on our side (given) and on their side (given back)
+----------------------------------------------------------------
+local function CountSandInTrade(getLink, getInfo)
     local n = 0
     for i = 1, MAX_SLOTS do
-        local link = GetTradePlayerItemLink(i)
+        local link = getLink(i)
         if link then
             local _, _, id = string.find(link, "item:(%d+)")
             if tonumber(id) == ATS_DB.ItemID then
-                local _, _, num = GetTradePlayerItemInfo(i)
+                local _, _, num = getInfo(i)
                 n = n + (num or 1)
             end
         end
     end
-    snap = { name = tradeName, sand = n }
+    return n
 end
 
+local function SnapshotTrade()
+    if not tradeOpen then return end
+    snap = {
+        name = tradeName,
+        sand = CountSandInTrade(GetTradePlayerItemLink, GetTradePlayerItemInfo),
+        back = CountSandInTrade(GetTradeTargetItemLink, GetTradeTargetItemInfo),
+    }
+end
+
+----------------------------------------------------------------
+-- Recording
+----------------------------------------------------------------
 local function RecordTrade(name, sand)
     if not ATS_DB.History then ATS_DB.History = {} end
     local h = ATS_DB.History[name]
     if not h then
-        h = { sand = 0, trades = 0 }
+        h = { sand = 0, trades = 0, used = 0, back = 0 }
         ATS_DB.History[name] = h
     end
-    h.sand = (h.sand or 0) + sand
-    h.trades = (h.trades or 0) + 1
+    h.sand = Num(h.sand) + sand
+    h.trades = Num(h.trades) + 1
     h.last = time()
-    if ATS_DB.Debug then Msg("history: " .. name .. " +" .. sand .. " sand") end
+    if ATS_DB.Debug then Msg("history: " .. name .. " received " .. sand .. " sand") end
+    if RefreshHistory then RefreshHistory() end
+end
+
+-- They handed sand back to us in a trade.
+local function RecordReturn(name, n)
+    local h = ATS_DB.History and ATS_DB.History[name]
+    if not h then return end
+    h.back = Num(h.back) + n
+    h.last = time()
+    if ATS_DB.Debug then Msg("history: " .. name .. " gave back " .. n .. " sand") end
+    if RefreshHistory then RefreshHistory() end
+end
+
+-- We saw them use one sand (combat log). Only counted while they still hold some of ours.
+local function RecordUse(name)
+    local h = ATS_DB.History and ATS_DB.History[name]
+    if not h then return end
+    if Outstanding(h) <= 0 then return end
+    h.used = Num(h.used) + 1
+    h.last = time()
+    if ATS_DB.Debug then Msg("history: " .. name .. " used 1 sand") end
     if RefreshHistory then RefreshHistory() end
 end
 
 -- Called when the client reports "Trade complete."
 local function OnTradeComplete()
     local s = snap or closedSnap
-    if s and s.name and s.sand and s.sand > 0 then
-        RecordTrade(s.name, s.sand)
+    if s and s.name then
+        if s.sand and s.sand > 0 then RecordTrade(s.name, s.sand) end
+        if s.back and s.back > 0 then RecordReturn(s.name, s.back) end
     end
     snap = nil
     closedSnap = nil
 end
 
+local function EscapePattern(s)
+    return (string.gsub(s, "(%W)", "%%%1"))
+end
+
+-- Combat log lines such as "Bob casts Hourglass Sand." (other players) .
+local function OnSpellMessage(msg)
+    if not msg then return end
+    local spell = ATS_DB.SpellName or DEFAULT_SPELL
+    if not string.find(msg, spell, 1, true) then return end
+    if ATS_DB.Debug then Msg("sand log: " .. msg) end
+    local esc = EscapePattern(spell)
+    local _, _, who = string.find(msg, "^(.-) casts " .. esc)
+    if not who then
+        _, _, who = string.find(msg, "^(.-) uses " .. esc)
+    end
+    if who and who ~= "" then RecordUse(who) end
+end
+
+----------------------------------------------------------------
+-- Reset / undo + Blackwing Lair prompt
+----------------------------------------------------------------
+local function ResetHistory()
+    ATS_DB.PrevHistory = ATS_DB.History
+    ATS_DB.History = {}
+    RefreshHistory()
+    Msg("History reset (type /ats undo to restore it)")
+end
+
+local function UndoReset()
+    if not ATS_DB.PrevHistory then
+        Msg("Nothing to restore")
+        return
+    end
+    ATS_DB.History = ATS_DB.PrevHistory
+    ATS_DB.PrevHistory = nil
+    RefreshHistory()
+    Msg("History restored")
+end
+
+StaticPopupDialogs["ATS_RESET_HISTORY"] = {
+    text = "You entered %s.\n\nReset the AutoTradeSand history (%s)?",
+    button1 = "Reset",
+    button2 = "Keep",
+    OnAccept = function() ResetHistory() end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+}
+
+local function CheckZone()
+    if not ATS_DB then return end
+    local zone = GetRealZoneText()
+    if not zone or zone == "" then zone = GetZoneText() end
+    if not zone or zone == "" then return end
+
+    local target = ATS_DB.ResetZone or DEFAULT_RESET_ZONE
+    if string.lower(zone) == string.lower(target) then
+        if not ATS_DB.InResetZone then
+            ATS_DB.InResetZone = true
+            local players, sent = HistoryTotals()
+            if ATS_DB.PromptReset ~= false and players > 0 then
+                StaticPopup_Show("ATS_RESET_HISTORY", zone, players .. " players, " .. sent .. " sand")
+            end
+        end
+    else
+        ATS_DB.InResetZone = false
+    end
+end
+
+-- The zone name is not always ready right on the loading screen, so check twice.
+local zoneTimer = CreateFrame("Frame")
+zoneTimer:Hide()
+zoneTimer.t = 0
+zoneTimer:SetScript("OnUpdate", function()
+    this.t = this.t + arg1
+    if this.t >= 2 then
+        this:Hide()
+        CheckZone()
+    end
+end)
+
+local function ScheduleZoneCheck()
+    CheckZone()
+    zoneTimer.t = 0
+    zoneTimer:Show()
+end
+
+----------------------------------------------------------------
+-- History tab rendering
+----------------------------------------------------------------
+local function Cell(v)
+    if v and v > 0 then return tostring(v) end
+    return "-"
+end
+
 RefreshHistory = function()
     if not ConfigFrame then return end
     local list = {}
-    local totalSand, players = 0, 0
     if ATS_DB.History then
         for name, h in pairs(ATS_DB.History) do
-            table.insert(list, { name = name, sand = h.sand or 0, trades = h.trades or 0 })
-            totalSand = totalSand + (h.sand or 0)
-            players = players + 1
+            table.insert(list, {
+                name = name,
+                sent = Num(h.sand),
+                used = Num(h.used),
+                back = Num(h.back),
+                left = Outstanding(h),
+            })
         end
     end
     table.sort(list, function(a, b)
-        if a.sand ~= b.sand then return a.sand > b.sand end
+        if a.sent ~= b.sent then return a.sent > b.sent end
         return a.name < b.name
     end)
+    local i
     for i = 1, HIST_ROWS do
         local row = histRows[i]
         local e = list[i]
         if e then
             row.name:SetText(e.name)
-            row.cnt:SetText(e.sand .. "  (" .. e.trades .. "x)")
+            row.sent:SetText(Cell(e.sent))
+            row.used:SetText(Cell(e.used))
+            row.back:SetText(Cell(e.back))
+            row.left:SetText(Cell(e.left))
         else
             row.name:SetText("")
-            row.cnt:SetText("")
+            row.sent:SetText("")
+            row.used:SetText("")
+            row.back:SetText("")
+            row.left:SetText("")
         end
     end
-    local txt = players .. " players - " .. totalSand .. " sand traded"
-    if players > HIST_ROWS then txt = txt .. " (top " .. HIST_ROWS .. " shown)" end
+    local players, sent, used, back, left = HistoryTotals()
+    local txt = players .. " players - sent " .. sent .. ", used " .. used .. ", back " .. back .. ", left " .. left
+    if players > HIST_ROWS then txt = txt .. " (top " .. HIST_ROWS .. ")" end
     histSummary:SetText(txt)
 end
 
@@ -522,11 +702,13 @@ local function ShowTab(name)
         if name == "history" then histW[i]:Show() else histW[i]:Hide() end
     end
     if name == "history" then
+        ConfigFrame:SetWidth(480)
         ConfigFrame:SetHeight(405)
         tabBtnH:Disable()
         tabBtnS:Enable()
     else
-        ConfigFrame:SetHeight(285)
+        ConfigFrame:SetWidth(390)
+        ConfigFrame:SetHeight(315)
         tabBtnS:Disable()
         tabBtnH:Enable()
     end
@@ -535,7 +717,7 @@ end
 local function CreateConfig()
     local f = CreateFrame("Frame", "ATS_ConfigFrame", UIParent)
     f:SetWidth(390)
-    f:SetHeight(285)
+    f:SetHeight(315)
     f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
     f:SetFrameStrata("DIALOG")
     f:SetMovable(true)
@@ -630,6 +812,15 @@ local function CreateConfig()
     end)
     table.insert(settingsW, cfgEdit)
 
+    cfgZone = CreateFrame("CheckButton", "ATS_ZoneCheck", f, "UICheckButtonTemplate")
+    cfgZone:SetPoint("TOPLEFT", f, "TOPLEFT", 40, -192)
+    getglobal("ATS_ZoneCheckText"):SetText("Ask to reset history in " .. DEFAULT_RESET_ZONE)
+    cfgZone:SetScript("OnClick", function()
+        if refreshing then return end
+        if this:GetChecked() then ATS_DB.PromptReset = true else ATS_DB.PromptReset = false end
+    end)
+    table.insert(settingsW, cfgZone)
+
     local fill = CreateFrame("Button", "ATS_FillButton", f, "UIPanelButtonTemplate")
     fill:SetWidth(110)
     fill:SetHeight(22)
@@ -658,19 +849,16 @@ local function CreateConfig()
     ------------------------------------------------------------
     -- History tab: 2 columns x 20 rows = 40 players at a glance
     ------------------------------------------------------------
-    local col, r
+    local col, k
     for col = 0, 1 do
-        local x = 24 + col * 185
-        local hp = f:CreateFontString("ATS_HistHeadP" .. col, "ARTWORK", "GameFontNormalSmall")
-        hp:SetPoint("TOPLEFT", f, "TOPLEFT", x, -70)
-        hp:SetText("Player")
-        table.insert(histW, hp)
-        local hs = f:CreateFontString("ATS_HistHeadS" .. col, "ARTWORK", "GameFontNormalSmall")
-        hs:SetPoint("TOPLEFT", f, "TOPLEFT", x + 85, -70)
-        hs:SetWidth(80)
-        hs:SetJustifyH("RIGHT")
-        hs:SetText("Sand (trades)")
-        table.insert(histW, hs)
+        for k = 1, 5 do
+            local hd = f:CreateFontString("ATS_HistHead" .. COLNAME[k] .. col, "ARTWORK", "GameFontNormalSmall")
+            hd:SetPoint("TOPLEFT", f, "TOPLEFT", 22 + col * 224 + COLX[k], -70)
+            hd:SetWidth(COLW[k])
+            if k == 1 then hd:SetJustifyH("LEFT") else hd:SetJustifyH("RIGHT") end
+            hd:SetText(COLNAME[k])
+            table.insert(histW, hd)
+        end
     end
 
     local i
@@ -678,24 +866,24 @@ local function CreateConfig()
         local c = 0
         if i > HIST_PER_COL then c = 1 end
         local rr = math.mod(i - 1, HIST_PER_COL)
-        local x = 24 + c * 185
+        local x0 = 22 + c * 224
         local y = -86 - rr * 13
-
-        local nameFS = f:CreateFontString("ATS_HistName" .. i, "ARTWORK", "GameFontHighlightSmall")
-        nameFS:SetPoint("TOPLEFT", f, "TOPLEFT", x, y)
-        nameFS:SetWidth(90)
-        nameFS:SetHeight(12)
-        nameFS:SetJustifyH("LEFT")
-
-        local cntFS = f:CreateFontString("ATS_HistCnt" .. i, "ARTWORK", "GameFontNormalSmall")
-        cntFS:SetPoint("TOPLEFT", f, "TOPLEFT", x + 85, y)
-        cntFS:SetWidth(80)
-        cntFS:SetHeight(12)
-        cntFS:SetJustifyH("RIGHT")
-
-        histRows[i] = { name = nameFS, cnt = cntFS }
-        table.insert(histW, nameFS)
-        table.insert(histW, cntFS)
+        local row = {}
+        for k = 1, 5 do
+            local tpl = "GameFontNormalSmall"
+            if k == 1 then tpl = "GameFontHighlightSmall" end
+            local fs = f:CreateFontString("ATS_Hist" .. COLNAME[k] .. i, "ARTWORK", tpl)
+            fs:SetPoint("TOPLEFT", f, "TOPLEFT", x0 + COLX[k], y)
+            fs:SetWidth(COLW[k])
+            fs:SetHeight(12)
+            if k == 1 then fs:SetJustifyH("LEFT") else fs:SetJustifyH("RIGHT") end
+            if COLCOL[k] then
+                fs:SetTextColor(COLCOL[k][1], COLCOL[k][2], COLCOL[k][3])
+            end
+            row[COLKEY[k]] = fs
+            table.insert(histW, fs)
+        end
+        histRows[i] = row
     end
 
     histSummary = f:CreateFontString("ATS_HistSummary", "ARTWORK", "GameFontHighlightSmall")
@@ -705,18 +893,24 @@ local function CreateConfig()
     local clearHist = CreateFrame("Button", "ATS_ClearHistory", f, "UIPanelButtonTemplate")
     clearHist:SetWidth(130)
     clearHist:SetHeight(22)
-    clearHist:SetPoint("BOTTOM", f, "BOTTOM", 0, 24)
-    clearHist:SetText("Clear history")
+    clearHist:SetPoint("BOTTOM", f, "BOTTOM", -70, 24)
+    clearHist:SetText("Reset history")
     clearHist:SetScript("OnClick", function()
         if IsShiftKeyDown() then
-            ATS_DB.History = {}
-            RefreshHistory()
-            Msg("History cleared")
+            ResetHistory()
         else
-            Msg("Hold Shift and click to clear the history")
+            Msg("Hold Shift and click to reset the history")
         end
     end)
     table.insert(histW, clearHist)
+
+    local undoHist = CreateFrame("Button", "ATS_UndoHistory", f, "UIPanelButtonTemplate")
+    undoHist:SetWidth(130)
+    undoHist:SetHeight(22)
+    undoHist:SetPoint("BOTTOM", f, "BOTTOM", 70, 24)
+    undoHist:SetText("Undo reset")
+    undoHist:SetScript("OnClick", function() UndoReset() end)
+    table.insert(histW, undoHist)
 
     tinsert(UISpecialFrames, "ATS_ConfigFrame")
 end
@@ -730,6 +924,8 @@ local function OnAddonLoaded()
     if not ATS_DB.ItemID then ATS_DB.ItemID = DEFAULT_ITEM_ID end
     if ATS_DB.AutoFill == nil then ATS_DB.AutoFill = true end
     if not ATS_DB.MinimapAngle then ATS_DB.MinimapAngle = 200 end
+    if not ATS_DB.History then ATS_DB.History = {} end
+    if ATS_DB.PromptReset == nil then ATS_DB.PromptReset = true end
     CreateConfig()
     CreateMinimapButton()
     Msg("AutoTradeSand loaded. Type /ats help")
@@ -762,6 +958,8 @@ local function ShowHelp()
     Msg("/ats config - open the config window")
     Msg("/ats toggle - enable / disable auto trade")
     Msg("/ats history - show who you traded sand to")
+    Msg("/ats undo - restore the history after a reset")
+    Msg("/ats zone <name> - zone that asks to reset the history")
     Msg("/ats fill - fill the trade window with sand")
     Msg("/ats clear - clear your side of the trade")
     Msg("/ats <number> - sand per trade (e.g. /ats 2)")
@@ -770,9 +968,8 @@ local function ShowHelp()
 end
 
 local function SlashHandler(text)
-    local cmd = string.lower(text or "")
-    local _, _, word, rest = string.find(cmd, "^(%S*)%s*(.-)$")
-    word = word or ""
+    local _, _, word, rest = string.find(text or "", "^(%S*)%s*(.-)$")
+    word = string.lower(word or "")
 
     if word == "" or word == "help" then
         ShowHelp()
@@ -781,6 +978,24 @@ local function SlashHandler(text)
     elseif word == "history" then
         if not ConfigFrame:IsVisible() then ConfigFrame:Show() end
         ShowTab("history")
+    elseif word == "undo" then
+        UndoReset()
+    elseif word == "zone" then
+        if rest and rest ~= "" then
+            ATS_DB.ResetZone = rest
+            ATS_DB.InResetZone = false
+            RefreshConfig()
+            Msg("History reset prompt zone set to: " .. rest)
+        else
+            Msg("Prompt zone: " .. (ATS_DB.ResetZone or DEFAULT_RESET_ZONE) .. " (usage: /ats zone <zone name>)")
+        end
+    elseif word == "spell" then
+        if rest and rest ~= "" then
+            ATS_DB.SpellName = rest
+            Msg("Sand spell name set to: " .. rest)
+        else
+            Msg("Sand spell name: " .. (ATS_DB.SpellName or DEFAULT_SPELL) .. " (usage: /ats spell <spell name>)")
+        end
     elseif word == "toggle" or word == "auto" then
         SetAutoFill(not ATS_DB.AutoFill)
     elseif word == "fill" then
@@ -827,12 +1042,22 @@ frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("TRADE_ACCEPT_UPDATE")
 frame:RegisterEvent("TRADE_PLAYER_ITEM_CHANGED")
 frame:RegisterEvent("UI_INFO_MESSAGE")
+frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+frame:RegisterEvent("CHAT_MSG_SPELL_SELF_BUFF")
+frame:RegisterEvent("CHAT_MSG_SPELL_PARTY_BUFF")
+frame:RegisterEvent("CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF")
 frame:SetScript("OnEvent", function()
     -- vanilla passes event data through the globals "event" and "arg1"
     if event == "ADDON_LOADED" and arg1 and string.lower(arg1) == "autotradesand" then
         OnAddonLoaded()
     elseif event == "PLAYER_ENTERING_WORLD" then
         if ATS_DB and UpdateSandIcon then UpdateSandIcon() end
+        if ATS_DB then ScheduleZoneCheck() end
+    elseif event == "ZONE_CHANGED_NEW_AREA" then
+        if ATS_DB then ScheduleZoneCheck() end
+    elseif event == "CHAT_MSG_SPELL_SELF_BUFF" or event == "CHAT_MSG_SPELL_PARTY_BUFF"
+        or event == "CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF" then
+        if ATS_DB then OnSpellMessage(arg1) end
     elseif event == "TRADE_SHOW" then
         if ATS_DB then OnTradeShow() end
     elseif event == "TRADE_CLOSED" then
