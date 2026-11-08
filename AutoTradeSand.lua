@@ -96,6 +96,41 @@ local function StopPending()
     timer:Hide()
 end
 
+-- Does the OTHER player currently offer the configured item in their trade slots?
+local function TargetOffersItem()
+    for i = 1, MAX_SLOTS do
+        local link = GetTradeTargetItemLink(i)
+        if link then
+            local _, _, id = string.find(link, "item:(%d+)")
+            if tonumber(id) == ATS_DB.ItemID then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Takes the configured item back out of OUR side of the trade (other items stay).
+-- Also cancels a fill in progress. Returns true if something was removed or cancelled.
+local function ClearOwnItem()
+    local did = (pending ~= nil)
+    StopPending()
+    for i = 1, MAX_SLOTS do
+        local link = GetTradePlayerItemLink(i)
+        if link then
+            local _, _, id = string.find(link, "item:(%d+)")
+            if tonumber(id) == ATS_DB.ItemID then
+                ClearCursor()
+                ClickTradeButton(i)
+                ClearCursor()
+                did = true
+            end
+        end
+    end
+    ClearCursor()
+    return did
+end
+
 local function PlaceInTrade(s)
     ClearCursor()
     PickupContainerItem(s.bag, s.slot)
@@ -226,6 +261,11 @@ end)
 local function FillTrade()
     if not tradeOpen then
         Msg("No trade in progress")
+        return
+    end
+
+    if TargetOffersItem() then
+        Msg("The other player is already offering it - not adding yours")
         return
     end
 
@@ -826,6 +866,7 @@ frame:RegisterEvent("TRADE_CLOSED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("TRADE_ACCEPT_UPDATE")
 frame:RegisterEvent("TRADE_PLAYER_ITEM_CHANGED")
+frame:RegisterEvent("TRADE_TARGET_ITEM_CHANGED")
 frame:RegisterEvent("UI_INFO_MESSAGE")
 frame:SetScript("OnEvent", function()
     -- vanilla passes event data through the globals "event" and "arg1"
@@ -837,6 +878,13 @@ frame:SetScript("OnEvent", function()
         if ATS_DB then OnTradeShow() end
     elseif event == "TRADE_CLOSED" then
         OnTradeClosed()
+    elseif event == "TRADE_TARGET_ITEM_CHANGED" then
+        -- the other player put the item in THEIR side: they are giving it to us, so take ours back
+        if ATS_DB and tradeOpen and TargetOffersItem() then
+            if ClearOwnItem() then
+                Msg((tradeName or "The other player") .. " is offering it - removed yours from the trade")
+            end
+        end
     elseif event == "TRADE_ACCEPT_UPDATE" or event == "TRADE_PLAYER_ITEM_CHANGED" then
         if ATS_DB and tradeOpen then SnapshotTrade() end
     elseif event == "UI_INFO_MESSAGE" then
