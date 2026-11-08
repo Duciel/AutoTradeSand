@@ -13,6 +13,7 @@ local refreshing = false
 local ConfigFrame, MinimapButton
 local pending = nil
 local tradeName, snap, closedSnap
+local acceptFrozen = false -- true once BOTH players accepted: the snapshot is then final
 local cfgCheck, cfgSlider, cfgEdit, cfgZone
 local RefreshConfig, UpdateMinimapButton, ToggleConfig, UpdateSandIcon
 
@@ -538,7 +539,7 @@ local function CountSandInTrade(getLink, getInfo)
 end
 
 local function SnapshotTrade()
-    if not tradeOpen then return end
+    if not tradeOpen or acceptFrozen then return end
     snap = {
         name = tradeName,
         sand = CountSandInTrade(GetTradePlayerItemLink, GetTradePlayerItemInfo),
@@ -978,7 +979,8 @@ local function OnTradeShow()
         tradeName = TradeFrameRecipientNameText:GetText()
     end
     closedSnap = nil
-    snap = { name = tradeName, sand = 0 }
+    acceptFrozen = false
+    snap = { name = tradeName, sand = 0, back = 0 }
     if ATS_DB.AutoFill then
         FillTrade()
     end
@@ -989,6 +991,7 @@ local function OnTradeClosed()
     pending = nil
     closedSnap = snap
     snap = nil
+    acceptFrozen = false
 end
 
 ----------------------------------------------------------------
@@ -1104,13 +1107,28 @@ frame:SetScript("OnEvent", function()
     elseif event == "TRADE_CLOSED" then
         OnTradeClosed()
     elseif event == "TRADE_TARGET_ITEM_CHANGED" then
+        -- keep the record of what is on their side up to date (they may add OR remove sand)
+        if ATS_DB and tradeOpen then SnapshotTrade() end
         -- the other player put the item in THEIR side: they are giving it to us, so take ours back
         if ATS_DB and tradeOpen and TargetOffersItem() then
             if ClearOwnItem() then
                 Msg((tradeName or "The other player") .. " is offering it - removed yours from the trade")
             end
         end
-    elseif event == "TRADE_ACCEPT_UPDATE" or event == "TRADE_PLAYER_ITEM_CHANGED" then
+    elseif event == "TRADE_ACCEPT_UPDATE" then
+        -- arg1 = we accepted, arg2 = they accepted. Once both did, the contents are final:
+        -- take the last snapshot and lock it so the window being emptied afterwards cannot change it.
+        if ATS_DB and tradeOpen then
+            acceptFrozen = false
+            SnapshotTrade()
+            if arg1 == 1 and arg2 == 1 then
+                acceptFrozen = true
+                if ATS_DB.Debug and snap then
+                    Msg("trade accepted by both: sent " .. snap.sand .. ", back " .. snap.back)
+                end
+            end
+        end
+    elseif event == "TRADE_PLAYER_ITEM_CHANGED" then
         if ATS_DB and tradeOpen then SnapshotTrade() end
     elseif event == "UI_INFO_MESSAGE" then
         if ATS_DB and arg1 and arg1 == (ERR_TRADE_COMPLETE or "Trade complete.") then
